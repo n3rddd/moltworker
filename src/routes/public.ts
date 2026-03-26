@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { MOLTBOT_PORT } from '../config';
-import { findExistingMoltbotProcess } from '../gateway';
+import { findExistingMoltbotProcess, ensureMoltbotGateway } from '../gateway';
 
 /**
  * Public routes - NO Cloudflare Access authentication required
@@ -35,8 +35,17 @@ publicRoutes.get('/api/status', async (c) => {
   const sandbox = c.get('sandbox');
 
   try {
-    const process = await findExistingMoltbotProcess(sandbox);
+    let process = await findExistingMoltbotProcess(sandbox);
     if (!process) {
+      // No gateway process found — kick off a start attempt in the background.
+      // The loading page polls /api/status, so this ensures the gateway
+      // eventually starts even if the initial waitUntil from the catch-all
+      // route didn't fire (e.g., due to DO execution context limitations).
+      c.executionCtx.waitUntil(
+        ensureMoltbotGateway(sandbox, c.env).catch((err: Error) => {
+          console.error('[api/status] Background gateway start failed:', err);
+        }),
+      );
       return c.json({ ok: false, status: 'not_running' });
     }
 
