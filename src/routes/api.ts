@@ -259,20 +259,18 @@ adminApi.post('/gateway/restart', async (c) => {
       await new Promise((r) => setTimeout(r, 2000));
     }
 
-    // Clear the restore flag so the next request re-restores from R2
+    // Clear the restore flag so the next request re-restores from R2.
+    // We intentionally do NOT start the gateway here — the next incoming
+    // request will trigger restoreIfNeeded() first (in the middleware),
+    // then ensureMoltbotGateway() (in the catch-all route), ensuring
+    // the FUSE overlay is mounted before the gateway writes config files.
     clearPersistenceCache();
-
-    // Start a new gateway in the background
-    const bootPromise = ensureMoltbotGateway(sandbox, c.env).catch((err) => {
-      console.error('Gateway restart failed:', err);
-    });
-    c.executionCtx.waitUntil(bootPromise);
 
     return c.json({
       success: true,
       message: existingProcess
-        ? 'Gateway process killed, new instance starting...'
-        : 'No existing process found, starting new instance...',
+        ? 'Gateway process killed, will restart on next request'
+        : 'No existing process found, will start on next request',
       previousProcessId: existingProcess?.id,
     });
   } catch (error) {
