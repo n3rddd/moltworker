@@ -268,9 +268,13 @@ app.all('*', async (c) => {
   // The loading page polls /api/status which handles restore + gateway start.
 
   // For non-WebSocket, non-HTML requests (API calls, static assets), we need
-  // the gateway to be running. Try with a timeout — if it's not ready, return
-  // an error that the client can retry.
+  // the gateway to be running. Restore first, then start.
   if (!isWebSocketRequest && !acceptsHtml) {
+    try {
+      await restoreIfNeeded(sandbox, c.env.BACKUP_BUCKET);
+    } catch {
+      // non-fatal
+    }
     try {
       await ensureGateway(sandbox, c.env);
     } catch (error) {
@@ -310,8 +314,13 @@ app.all('*', async (c) => {
       containerResponse = await sandbox.wsConnect(wsRequest, GATEWAY_PORT);
     } catch (err) {
       if (isGatewayCrashedError(err)) {
-        console.log('[WS] Gateway crashed, attempting restart and retry...');
+        console.log('[WS] Gateway crashed, attempting restore + restart and retry...');
         await killGateway(sandbox);
+        try {
+          await restoreIfNeeded(sandbox, c.env.BACKUP_BUCKET);
+        } catch {
+          // non-fatal
+        }
         await ensureGateway(sandbox, c.env);
         try {
           containerResponse = await sandbox.wsConnect(wsRequest, GATEWAY_PORT);
@@ -458,8 +467,13 @@ app.all('*', async (c) => {
     httpResponse = await sandbox.containerFetch(request, GATEWAY_PORT);
   } catch (err) {
     if (isGatewayCrashedError(err)) {
-      console.log('[HTTP] Gateway crashed, attempting restart and retry...');
+      console.log('[HTTP] Gateway crashed, attempting restore + restart and retry...');
       await killGateway(sandbox);
+      try {
+        await restoreIfNeeded(sandbox, c.env.BACKUP_BUCKET);
+      } catch {
+        // non-fatal
+      }
       await ensureGateway(sandbox, c.env);
       try {
         httpResponse = await sandbox.containerFetch(request, GATEWAY_PORT);
@@ -482,7 +496,29 @@ app.all('*', async (c) => {
   }
   console.log('[HTTP] Response status:', httpResponse.status);
 
-  // Add debug header to verify worker handled the request
+  // For HTML requests, verify we got actual content from the gateway.
+  // containerFetch can return a 200 with empty body if the gateway's
+  // HTTP handler hasn't fully initialized. Show the loading page instead
+  // of a blank page that the user would be stuck on forever.
+  if (acceptsHtml) {
+    const body = await httpResponse.text();
+    if (!body || body.length < 50) {
+      console.log(
+        `[HTTP] Empty/short response (${body.length} bytes) for HTML request, serving loading page`,
+      );
+      return c.html(loadingPageHtml);
+    }
+    const newHeaders = new Headers(httpResponse.headers);
+    newHeaders.set('X-Worker-Debug', 'proxy-to-gateway');
+    newHeaders.set('X-Debug-Path', url.pathname);
+    return new Response(body, {
+      status: httpResponse.status,
+      statusText: httpResponse.statusText,
+      headers: newHeaders,
+    });
+  }
+
+  // Non-HTML: pass through as-is
   const newHeaders = new Headers(httpResponse.headers);
   newHeaders.set('X-Worker-Debug', 'proxy-to-gateway');
   newHeaders.set('X-Debug-Path', url.pathname);
