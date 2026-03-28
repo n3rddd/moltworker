@@ -98,6 +98,14 @@ export async function createSnapshot(
     await bucket.delete(`backups/${previousHandle.id}/meta.json`);
   }
 
+  // Log directory contents before backup so we can verify what's captured
+  try {
+    const lsResult = await sandbox.exec(`ls ${BACKUP_DIR}/clawd/ 2>&1 || echo "(empty)"`);
+    console.log(`[persistence] Pre-backup ${BACKUP_DIR}/clawd/:`, lsResult.stdout?.trim());
+  } catch {
+    // non-fatal
+  }
+
   console.log('[persistence] Creating backup...');
   const t0 = Date.now();
   const handle = await sandbox.createBackup({

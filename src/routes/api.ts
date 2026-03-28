@@ -220,11 +220,23 @@ adminApi.post('/storage/sync', async (c) => {
   const sandbox = c.get('sandbox');
 
   try {
+    // Log mount state before backup for diagnostics
+    let mountState = 'unknown';
+    let dirContents = 'unknown';
+    try {
+      const mnt = await sandbox.exec('mount | grep openclaw || echo "NO_OVERLAY"');
+      mountState = mnt.stdout?.trim() ?? 'empty';
+      const ls = await sandbox.exec('ls /home/openclaw/clawd/ 2>&1 || echo "(empty)"');
+      dirContents = ls.stdout?.trim() ?? 'empty';
+    } catch {
+      // non-fatal
+    }
     const handle = await createSnapshot(sandbox, c.env.BACKUP_BUCKET);
     return c.json({
       success: true,
       message: 'Snapshot created successfully',
       backupId: handle.id,
+      debug: { mountState, dirContents },
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
