@@ -262,10 +262,27 @@ app.all('*', async (c) => {
   const isWebSocketRequest = request.headers.get('Upgrade')?.toLowerCase() === 'websocket';
   const acceptsHtml = request.headers.get('Accept')?.includes('text/html');
 
-  // For browser HTML requests, always try the proxy first but with a fallback
-  // to the loading page. This avoids calling listProcesses() which can hang
-  // on cold start (the DO RPC takes 30-60s and kills the Worker via CPU limit).
-  // The loading page polls /api/status which handles restore + gateway start.
+  // For browser HTML requests, check if the gateway is running before proxying.
+  // If not running, serve the loading page immediately. The loading page polls
+  // /api/status which handles restore + gateway start. We use a very short timeout
+  // (3s) on findExistingGatewayProcess to avoid blocking — if it doesn't respond,
+  // we assume the gateway isn't ready.
+  if (!isWebSocketRequest && acceptsHtml) {
+    let gatewayReady = false;
+    try {
+      const proc = await Promise.race([
+        findExistingGatewayProcess(sandbox),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 3_000)),
+      ]);
+      gatewayReady = proc !== null && proc.status === 'running';
+    } catch {
+      // Treat as not ready
+    }
+    if (!gatewayReady) {
+      console.log('[PROXY] Gateway not ready for HTML request, serving loading page');
+      return c.html(loadingPageHtml);
+    }
+  }
 
   // For non-WebSocket, non-HTML requests (API calls, static assets), we need
   // the gateway to be running. Restore first, then start.
@@ -464,19 +481,7 @@ app.all('*', async (c) => {
 
   let httpResponse: Response;
   try {
-    // For HTML requests, add a timeout to avoid hanging on cold start.
-    // containerFetch blocks until the container responds, which can take
-    // 30-60s+ on cold start. If it takes too long, serve the loading page.
-    if (acceptsHtml) {
-      httpResponse = await Promise.race([
-        sandbox.containerFetch(request, GATEWAY_PORT),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('proxy timeout')), 15_000),
-        ),
-      ]);
-    } else {
-      httpResponse = await sandbox.containerFetch(request, GATEWAY_PORT);
-    }
+    httpResponse = await sandbox.containerFetch(request, GATEWAY_PORT);
   } catch (err) {
     if (isGatewayCrashedError(err)) {
       console.log('[HTTP] Gateway crashed, attempting restore + restart and retry...');
@@ -513,18 +518,7 @@ app.all('*', async (c) => {
   // HTTP handler hasn't fully initialized. Show the loading page instead
   // of a blank page that the user would be stuck on forever.
   if (acceptsHtml) {
-    let body: string;
-    try {
-      body = await Promise.race([
-        httpResponse.text(),
-        new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error('body read timeout')), 10_000),
-        ),
-      ]);
-    } catch {
-      console.log('[HTTP] Body read timed out, serving loading page');
-      return c.html(loadingPageHtml);
-    }
+    const body = await httpResponse.text();
     if (!body || body.length < 50) {
       console.log(
         `[HTTP] Empty/short response (${body.length} bytes) for HTML request, serving loading page`,
